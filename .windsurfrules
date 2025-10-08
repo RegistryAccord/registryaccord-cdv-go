@@ -1,0 +1,44 @@
+# Windsurf Project Rules (Interim)
+
+Normative terms (MUST/SHOULD/MAY) follow RFC 2119/8174 as used in upstream `TERMINOLOGY.md`. Governance, evolution, and schema conventions follow upstream `GOVERNANCE.md`, `schemas/SPEC-README.md`, and `schemas/INDEX.md` (Lexicon v1, NSIDs).
+
+## Project Scope
+- **Language/Runtime**: Go 1.25+.
+- **Service Type**: CDV identity service (identity issuance, DID ops). Production-grade server.
+- **API Naming**: SHOULD mirror upstream Lexicon NSIDs as a schema language only (e.g., `com.registryaccord.identity`).
+
+## Folder Layout
+- `cmd/identityd/` – service entrypoint and wiring.
+- `internal/` – implementation details (handlers, storage, DID adapters, validation).
+- `pkg/` – reusable, stable libraries (no internal deps).
+- `api/` – API schema artifacts (e.g., OpenAPI), examples, and naming aligned to upstream NSIDs.
+- `docs/` – ARCHITECTURE, SECURITY, CODING_STANDARDS, AI_GUIDE, DECISIONS (ADRs).
+
+## Testing Policy
+- MUST provide unit tests for public behavior.
+- Prefer table-driven tests; store golden files in `testdata/`.
+- CI runs: `make fmt-check`, `make lint`, `make test` (race+coverage), and optional `make api-validate` for name/shape checks.
+
+## Logging & Output
+- Use `log/slog` with structured fields.
+- MUST NOT log secrets, credentials, tokens, or PII.
+- Errors wrapped (`%w`), include actionable context; avoid leaking internals to clients.
+
+## Security Basics
+- No secrets in repository or logs. Follow least privilege for credentials.
+- All external inputs MUST be validated at boundaries.
+- CI includes `gosec` via `golangci-lint`.
+
+## PR Checklist
+- `make fmt && make lint && make test` pass.
+- Minimal diffs; avoid unrelated churn.
+- If public behavior changed: update `README.md`, `docs/*`, and create/update ADRs in `docs/DECISIONS/`.
+- If API shape touched: confirm naming with `schemas/INDEX.md` from specs.
+- Link to related issue and upstream references (TERMINOLOGY, GOVERNANCE, SPEC-README).
+
+## Task Policy
+- Adding a feature: update or add ADR with rationale; include tests and docs.
+- Breaking behavior: propose new endpoints/types (do not break in place); document migration; reference upstream governance for evolution rules.
+
+## References
+- Upstream: `../registryaccord-specs/README.md`, `schemas/INDEX.md`, `schemas/SPEC-README.md`, `GOVERNANCE.md`, `TERMINOLOGY.md`, `CONTRIBUTING.md`.

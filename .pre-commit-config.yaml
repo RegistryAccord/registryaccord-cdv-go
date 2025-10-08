@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.61.0
+    hooks:
+      - id: golangci-lint
+        args: ["--fix=false"]
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+      - id: go-vet
+  - repo: https://github.com/markdownlint/markdownlint
+    rev: v0.13.0
+    hooks:
+      - id: markdownlint
+  - repo: https://github.com/licensebat/licensebat
+    rev: v0.0.7
+    hooks:
+      - id: licensebat
+        stages: [manual]

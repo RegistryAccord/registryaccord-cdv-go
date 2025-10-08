@@ -1,0 +1,9 @@
+# CODEOWNERS mirrors specs repo roles for API-affecting changes.
+# Files touching API schemas, handlers, or public endpoints require spec-editors review.
+
+*                                   @registryaccord/service-owners
+/api/**                              @registryaccord/spec-editors @registryaccord/service-owners
+/docs/ARCHITECTURE.md               @registryaccord/service-owners
+/docs/DECISIONS/*                   @registryaccord/service-owners @registryaccord/spec-editors
+/.github/workflows/**               @registryaccord/service-owners
+/Makefile                           @registryaccord/service-owners

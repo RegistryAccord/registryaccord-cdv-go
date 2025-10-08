@@ -1,0 +1,27 @@
+# Go
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.log
+coverage.out
+coverage.html
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Dependencies / build cache
+vendor/
+node_modules/
+.DS_Store

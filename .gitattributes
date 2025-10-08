@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# Normalize common types
+*.go text eol=lf diff=golang
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+
+# Treat generated/binaries
+bin/* linguist-vendored
