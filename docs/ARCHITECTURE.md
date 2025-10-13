@@ -3,30 +3,45 @@
 Normative terms (MUST/SHOULD/MAY) follow RFC 2119/8174 and upstream `TERMINOLOGY.md`. API naming SHOULD align with upstream Lexicon NSIDs as a schema language only (see `schemas/INDEX.md`).
 
 ## Purpose
-`registryaccord-cdv-go` provides core CDV service capabilities for identity issuance and DID operations aligned with the RegistryAccord protocol.
+`registryaccord-cdv-go` provides core CDV (Creator Data Vault) service capabilities for storing and managing user-generated content, media assets, and related metadata aligned with the RegistryAccord protocol.
 
 ## Boundaries
-- **Identity issuance**: create/resolve identities; map to upstream `com.registryaccord.identity` concepts.
-- **DID ops**: key/material management, DID document updates (method-specific adapters kept internal).
-- **Out of scope**: client SDKs, UI, and non-core experimental endpoints.
+- **Record Management**: Create, store, and retrieve user-generated content records (posts, profiles, follows, etc.)
+- **Media Storage**: Handle media asset uploads with checksum verification and metadata management
+- **Schema Validation**: Enforce upstream lexicon schemas at write time for all supported collections
+- **Event Streaming**: Publish record and media events to NATS JetStream for real-time updates
+- **Authentication**: JWT-based authentication with DID validation
+- **Out of scope**: Identity creation/management (handled by separate identity service), client SDKs, UI
 
 ## Components
-- `cmd/identityd/`: service entrypoint and wiring.
-- `internal/`: implementation details (storage, DID adapters, handlers).
-- `pkg/`: stable helper packages intended for reuse.
-- `api/`: OpenAPI and request/response shapes that mirror upstream schema terms.
+- `cmd/cdvd/`: Service entrypoint and wiring
+- `internal/model/`: Core data structures for accounts, records, and media assets
+- `internal/storage/`: Storage implementations (in-memory and PostgreSQL)
+- `internal/server/`: HTTP handlers and routing with JWT middleware
+- `internal/schema/`: JSON schema validation for record validation
+- `internal/event/`: NATS JetStream event publishing
+- `internal/media/`: S3-compatible media storage operations
+- `internal/identity/`: Client for interacting with the identity service
 
 ## API Surface
-- HTTP JSON endpoints for identity creation and lookup; names SHOULD reflect upstream NSIDs (e.g., `/x/com.registryaccord.identity/create`).
-- OpenAPI: TODO stub (`api/openapi.yaml`).
+- RESTful HTTP JSON endpoints for record and media operations
+- Standard error taxonomy with deterministic error codes
+- Cursor-based pagination for list operations
+- JWT-based authentication for mutating operations
 
 ## Storage
-- Pluggable storage (memory/sql/kv). Minimal initial implementation with clear interfaces in `internal/storage`.
+- PostgreSQL implementation for production use with schema-defined tables and indexes
+- In-memory implementation for development and testing
+- Tables for accounts, records, media assets, and operation logs
 
 ## Integrations
-- **Gateway/CDV**: Interacts per protocol to publish and resolve identity records. Align field names and statuses with upstream examples.
+- **Identity Service**: Validate DIDs and JWT signatures via HTTP calls
+- **S3 Storage**: Generate presigned URLs for direct client uploads
+- **NATS JetStream**: Stream record and media events for real-time updates
 
 ## Observability
-- `log/slog` structured logs; metrics hooks MAY be added behind interfaces.
+- Structured JSON logging with `log/slog`
+- Correlation IDs for request tracing
+- Metrics hooks for request latency and error tracking
 
 References: `../registryaccord-specs/README.md`, `schemas/SPEC-README.md`, `GOVERNANCE.md`, `TERMINOLOGY.md`.

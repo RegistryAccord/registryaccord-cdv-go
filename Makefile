@@ -1,8 +1,8 @@
 SHELL := /bin/bash
 GO ?= go
 PKG := ./...
-BINARY := identityd
-CMD_DIR := ./cmd/identityd
+BINARY := cdvd
+CMD_DIR := ./cmd/cdvd
 COVER_PROFILE := coverage.out
 
 .PHONY: help

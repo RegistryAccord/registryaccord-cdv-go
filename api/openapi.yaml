@@ -1,0 +1,608 @@
+openapi: 3.0.3
+info:
+  title: RegistryAccord Creator Data Vault (CDV) API
+  description: |
+    The Creator Data Vault (CDV) service provides secure storage and management of creator data
+    with schema validation, JWT authentication, and event streaming.
+    
+    This API implements Phase 1 CDV requirements including:
+    - RESTful API endpoints for record and media operations
+    - Schema validation for supported collections
+    - JWT/DID authorization
+    - PostgreSQL storage
+    - NATS JetStream eventing
+    - S3-compatible media storage
+    - Structured logging and observability
+  version: 1.0.0
+  contact:
+    name: RegistryAccord Team
+    url: https://github.com/RegistryAccord/registryaccord-cdv-go
+  license:
+    name: AGPL-3.0
+    url: https://www.gnu.org/licenses/agpl-3.0.en.html
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://cdv.registryaccord.org
+    description: Production server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token with DID subject for authentication
+  
+  schemas:
+    # Error response envelope
+    ErrorEnvelope:
+      type: object
+      required:
+        - error
+        - correlationId
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              description: Error code from CDV error taxonomy
+              example: CDV_SCHEMA_REJECT
+            message:
+              type: string
+              description: Human-readable error message
+              example: "schema validation failed: text is required"
+        correlationId:
+          type: string
+          description: Unique identifier for tracing requests across services
+          example: 123e4567-e89b-12d3-a456-426614174000
+    
+    # Success response envelope
+    SuccessEnvelope:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: Response data payload
+        correlationId:
+          type: string
+          description: Unique identifier for tracing requests across services
+          example: 123e4567-e89b-12d3-a456-426614174000
+    
+    # Record creation request
+    CreateRecordRequest:
+      type: object
+      required:
+        - did
+        - collection
+        - record
+      properties:
+        did:
+          type: string
+          description: DID of the record owner
+          example: did:ra:123456789abcdefghi
+        collection:
+          type: string
+          description: NSID of the record collection
+          example: com.registryaccord.feed.post
+        record:
+          type: object
+          description: Record data to be validated against schema
+          example:
+            text: Hello, world!
+            createdAt: "2023-01-01T00:00:00Z"
+            authorDid: did:ra:123456789abcdefghi
+        cid:
+          type: string
+          description: Optional content identifier (hash) for the record
+          example: bafyreidfg725dfg725dfg725dfg725dfg725dfg725dfg725dfg725dfg
+    
+    # Record creation response
+    CreateRecordResponse:
+      type: object
+      required:
+        - uri
+        - cid
+        - schemaVersion
+      properties:
+        uri:
+          type: string
+          description: Record URI
+          example: at://did:ra:123456789abcdefghi/com.registryaccord.feed.post/123456789abcdefghi
+        cid:
+          type: string
+          description: Content identifier (hash) of the record
+          example: bafyreidfg725dfg725dfg725dfg725dfg725dfg725dfg725dfg725dfg
+        schemaVersion:
+          type: string
+          description: Schema version used for validation
+          example: 1.0.0
+    
+    # List records query parameters
+    ListRecordsQuery:
+      type: object
+      properties:
+        did:
+          type: string
+          description: DID of the record owner
+          example: did:ra:123456789abcdefghi
+        collection:
+          type: string
+          description: NSID of the record collection
+          example: com.registryaccord.feed.post
+        since:
+          type: string
+          format: date-time
+          description: Only return records created after this time
+          example: "2023-01-01T00:00:00Z"
+        until:
+          type: string
+          format: date-time
+          description: Only return records created before this time
+          example: "2023-12-31T23:59:59Z"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Maximum number of records to return
+          example: 50
+        cursor:
+          type: string
+          description: Cursor for pagination
+          example: eyJpZCI6IjEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6In0=
+    
+    # List records response
+    ListRecordsResponse:
+      type: object
+      required:
+        - records
+      properties:
+        records:
+          type: array
+          items:
+            type: object
+            required:
+              - uri
+              - cid
+              - value
+              - schemaVersion
+              - indexedAt
+            properties:
+              uri:
+                type: string
+                description: Record URI
+                example: at://did:ra:123456789abcdefghi/com.registryaccord.feed.post/123456789abcdefghi
+              cid:
+                type: string
+                description: Content identifier (hash) of the record
+                example: bafyreidfg725dfg725dfg725dfg725dfg725dfg725dfg725dfg725dfg
+              value:
+                type: object
+                description: Record data
+              schemaVersion:
+                type: string
+                description: Schema version used for validation
+                example: 1.0.0
+              indexedAt:
+                type: string
+                format: date-time
+                description: When the record was indexed
+                example: "2023-01-01T00:00:00Z"
+        cursor:
+          type: string
+          description: Cursor for pagination
+          example: eyJpZCI6IjEyMzQ1Njc4OWFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6In0=
+    
+    # Media upload initialization request
+    UploadInitRequest:
+      type: object
+      required:
+        - did
+        - mimeType
+        - size
+      properties:
+        did:
+          type: string
+          description: DID of the media owner
+          example: did:ra:123456789abcdefghi
+        mimeType:
+          type: string
+          description: MIME type of the media
+          example: image/jpeg
+        size:
+          type: integer
+          description: Size of the media in bytes
+          example: 1024000
+        filename:
+          type: string
+          description: Optional filename
+          example: photo.jpg
+    
+    # Media upload initialization response
+    UploadInitResponse:
+      type: object
+      required:
+        - assetId
+        - uploadUrl
+      properties:
+        assetId:
+          type: string
+          description: Unique identifier for the media asset
+          example: 123456789abcdefghi
+        uploadUrl:
+          type: string
+          description: Presigned URL for uploading the media
+          example: https://s3.amazonaws.com/bucket/123456789abcdefghi?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...
+    
+    # Media finalization request
+    FinalizeRequest:
+      type: object
+      required:
+        - assetId
+        - checksum
+      properties:
+        assetId:
+          type: string
+          description: Unique identifier for the media asset
+          example: 123456789abcdefghi
+        checksum:
+          type: string
+          description: SHA-256 checksum of the uploaded media
+          example: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    
+    # Media finalization response
+    FinalizeResponse:
+      type: object
+      required:
+        - uri
+      properties:
+        uri:
+          type: string
+          description: Media URI
+          example: at://did:ra:123456789abcdefghi/com.registryaccord.media.asset/123456789abcdefghi
+    
+    # Media metadata response
+    MediaMetaResponse:
+      type: object
+      required:
+        - assetId
+        - mimeType
+        - size
+        - checksum
+        - createdAt
+      properties:
+        assetId:
+          type: string
+          description: Unique identifier for the media asset
+          example: 123456789abcdefghi
+        mimeType:
+          type: string
+          description: MIME type of the media
+          example: image/jpeg
+        size:
+          type: integer
+          description: Size of the media in bytes
+          example: 1024000
+        checksum:
+          type: string
+          description: SHA-256 checksum of the media
+          example: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+        filename:
+          type: string
+          description: Optional filename
+          example: photo.jpg
+        createdAt:
+          type: string
+          format: date-time
+          description: When the media was created
+          example: "2023-01-01T00:00:00Z"
+
+paths:
+  /healthz:
+    get:
+      summary: Health check endpoint
+      description: Returns "ok" if the service is running
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+  
+  /readyz:
+    get:
+      summary: Readiness check endpoint
+      description: Returns "ok" if the service is ready to serve requests
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+  
+  /v1/repo/record:
+    post:
+      summary: Create a new record
+      description: Creates a new record in the specified collection after validating against the schema
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordRequest'
+      responses:
+        '200':
+          description: Record created successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/CreateRecordResponse'
+        '400':
+          description: Bad request (validation error, schema rejection)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized (invalid JWT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (DID mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  
+  /v1/repo/listRecords:
+    get:
+      summary: List records
+      description: Lists records with optional filtering and pagination
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: did
+          in: query
+          required: false
+          schema:
+            type: string
+          description: DID of the record owner
+        - name: collection
+          in: query
+          required: false
+          schema:
+            type: string
+          description: NSID of the record collection
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Only return records created after this time
+        - name: until
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Only return records created before this time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Maximum number of records to return
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Cursor for pagination
+      responses:
+        '200':
+          description: Records listed successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ListRecordsResponse'
+        '400':
+          description: Bad request (invalid parameters)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized (invalid JWT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  
+  /v1/media/uploadInit:
+    post:
+      summary: Initialize media upload
+      description: Initializes a media upload and returns a presigned URL for direct upload
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadInitRequest'
+      responses:
+        '200':
+          description: Upload initialized successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UploadInitResponse'
+        '400':
+          description: Bad request (invalid parameters, size limit exceeded, unsupported MIME type)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized (invalid JWT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (DID mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  
+  /v1/media/finalize:
+    post:
+      summary: Finalize media upload
+      description: Finalizes a media upload by verifying the checksum
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeRequest'
+      responses:
+        '200':
+          description: Upload finalized successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/FinalizeResponse'
+        '400':
+          description: Bad request (invalid parameters, checksum mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized (invalid JWT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (DID mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Not found (asset not found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  
+  /v1/media/{assetId}/meta:
+    get:
+      summary: Get media metadata
+      description: Retrieves metadata for a media asset
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Unique identifier for the media asset
+      responses:
+        '200':
+          description: Metadata retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/MediaMetaResponse'
+        '401':
+          description: Unauthorized (invalid JWT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Not found (asset not found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'

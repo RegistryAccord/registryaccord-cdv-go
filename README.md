@@ -1,5 +1,14 @@
 # registryaccord-cdv-go
-Go implementation of a RegistryAccord CDV service (identity issuance and DID operations). Aligns API naming with upstream Lexicon NSIDs as a schema language only (see `registryaccord-specs/schemas/INDEX.md`).
+Go implementation of a RegistryAccord Creator Data Vault (CDV) service. This service provides secure storage and management of creator data with schema validation, JWT authentication, and event streaming.
+
+Implements Phase 1 CDV requirements including:
+- RESTful API endpoints for record and media operations
+- Schema validation for supported collections
+- JWT/DID authorization
+- PostgreSQL storage
+- NATS JetStream eventing
+- S3-compatible media storage
+- Structured logging and observability
 
 License
 
@@ -9,11 +18,17 @@ License
 
 Requirements: Go 1.25+, `make`, `golangci-lint` (optional for local checks).
 
+For local development, copy `.env.example` to `.env` and customize as needed:
+
+```bash
+cp .env.example .env
+```
+
 Build and run:
 
 ```bash
 make build
-./bin/identityd
+./bin/cdvd
 ```
 
 Develop:
@@ -24,6 +39,24 @@ make lint      # static analysis
 make test      # tests with race+coverage
 make cover     # coverage summary+HTML
 ```
+
+## Environment Variables
+
+- `CDV_ENV` - Deployment environment (dev, staging, prod) (default: dev)
+- `CDV_PORT` - HTTP server port (default: 8080)
+- `CDV_DB_DSN` - PostgreSQL connection string
+- `CDV_NATS_URL` - NATS server URL
+- `CDV_S3_ENDPOINT` - S3-compatible storage endpoint
+- `CDV_S3_REGION` - S3 region (default: us-east-1)
+- `CDV_S3_BUCKET` - S3 bucket name
+- `CDV_S3_ACCESS_KEY` - S3 access key
+- `CDV_S3_SECRET_KEY` - S3 secret key
+- `CDV_JWT_ISSUER` - Expected JWT issuer
+- `CDV_JWT_AUDIENCE` - Expected JWT audience
+- `IDENTITY_URL` - Identity service URL for DID validation
+- `CDV_SPECS_URL` - URL to the specs repository for schema resolution (default: https://raw.githubusercontent.com/RegistryAccord/registryaccord-specs/main/schemas)
+- `CDV_REJECT_DEPRECATED_SCHEMAS` - Whether to reject deprecated schemas (default: false)
+- `CDV_CORS_ALLOWED_ORIGINS` - Comma-separated list of allowed origins for CORS (default: empty, which means deny all)
 
 ## Documentation
 

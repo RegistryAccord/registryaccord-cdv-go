@@ -43,6 +43,21 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Coverage check
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          if [ "$(echo "$COVERAGE < 80" | bc)" -eq 1 ]; then
+            echo "Coverage is below 80%: $COVERAGE%"
+            exit 1
+          else
+            echo "Coverage is acceptable: $COVERAGE%"
+          fi
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
       - name: API Validate (optional)
         run: |
           if make -n api-validate >/dev/null 2>&1; then
