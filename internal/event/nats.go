@@ -17,6 +17,15 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// ContextKey is used for context values to avoid collisions
+// when storing values in request context
+type ContextKey string
+
+const (
+	// ContextKeyCorrelationID is the key for storing correlation ID in request context
+	ContextKeyCorrelationID ContextKey = "correlationId" // Unique ID for request tracking
+)
+
 // Publisher interface defines the event publishing operations required by the CDV service.
 // It provides methods for publishing record and media events to the event stream.
 type Publisher interface {
@@ -58,8 +67,8 @@ type natsPub struct {
 	js nats.JetStreamContext // JetStream context for stream operations
 	
 	// Deduplication fields
-	recordDedup map[string]time.Time // Map of record IDs to last publish time
-	mediaDedup  map[string]time.Time // Map of media asset IDs to last publish time
+	recordDedup map[string]time.Time // Map of correlation IDs to last publish time for records
+	mediaDedup  map[string]time.Time // Map of correlation IDs to last publish time for media
 	mutex       sync.RWMutex         // Mutex for thread-safe access to dedup maps
 }
 
@@ -159,37 +168,37 @@ func (p *natsPub) Close() error {
 	return nil
 }
 
-// shouldDedup checks if an event should be deduplicated based on the 2-minute window.
-// It takes a map key (record ID or asset ID) and the dedup map, and returns true
-// if the event should be deduplicated (i.e., it was published within the last 2 minutes).
-func (p *natsPub) shouldDedup(key string, dedupMap map[string]time.Time) bool {
+// shouldDedup checks if an event should be deduplicated based on the 5-minute window.
+// It takes a correlation ID and the dedup map, and returns true
+// if the event should be deduplicated (i.e., it was published within the last 5 minutes).
+func (p *natsPub) shouldDedup(correlationID string, dedupMap map[string]time.Time) bool {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 	
-	if lastTime, exists := dedupMap[key]; exists {
-		// Check if the last event was within the 2-minute dedup window
-		return time.Since(lastTime) < 2*time.Minute
+	if lastTime, exists := dedupMap[correlationID]; exists {
+		// Check if the last event was within the 5-minute dedup window
+		return time.Since(lastTime) < 5*time.Minute
 	}
 	
 	return false
 }
 
-// updateDedup updates the deduplication map with the current time for a given key.
+// updateDedup updates the deduplication map with the current time for a given correlation ID.
 // This should be called after successfully publishing an event.
-func (p *natsPub) updateDedup(key string, dedupMap map[string]time.Time) {
+func (p *natsPub) updateDedup(correlationID string, dedupMap map[string]time.Time) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 	
 	// Clean up old entries to prevent memory leaks
-	cutoff := time.Now().Add(-5 * time.Minute) // Keep entries for 5 minutes
+	cutoff := time.Now().Add(-10 * time.Minute) // Keep entries for 10 minutes
 	for k, t := range dedupMap {
 		if t.Before(cutoff) {
 			delete(dedupMap, k)
 		}
 	}
 	
-	// Update the current key with the current time
-	dedupMap[key] = time.Now()
+	// Update the current correlation ID with the current time
+	dedupMap[correlationID] = time.Now()
 }
 
 // PublishRecordCreated publishes a record created event.
@@ -201,8 +210,21 @@ func (p *natsPub) updateDedup(key string, dedupMap map[string]time.Time) {
 // Returns:
 //   - error: Any error that occurred during publishing
 func (p *natsPub) PublishRecordCreated(ctx context.Context, collection string, record model.Record) error {
-	// Check if this event should be deduplicated
-	if p.shouldDedup(record.ID, p.recordDedup) {
+	// Extract correlation ID from context if available
+	correlationID := ""
+	if ctx.Value(ContextKeyCorrelationID) != nil {
+		if cid, ok := ctx.Value(ContextKeyCorrelationID).(string); ok {
+			correlationID = cid
+		}
+	}
+	
+	// If no correlation ID in context, generate a new one
+	if correlationID == "" {
+		correlationID = uuid.New().String()
+	}
+	
+	// Check if this event should be deduplicated based on correlation ID
+	if p.shouldDedup(correlationID, p.recordDedup) {
 		// Event was published recently, skip it
 		return nil
 	}
@@ -211,12 +233,20 @@ func (p *natsPub) PublishRecordCreated(ctx context.Context, collection string, r
 	subject := fmt.Sprintf("cdv.records.%s.created", collection)
 	
 	// Create the event envelope with metadata
+	// Create a specific payload with the required fields including schema version
+	payload := map[string]interface{}{
+		"uri":          record.URI,
+		"cid":          record.CID,
+		"schema_version": record.SchemaVersion,
+		"correlationId": correlationID,
+	}
+
 	envelope := EventEnvelope{
 		Type:         fmt.Sprintf("cdv.records.%s.created", collection), // Event type
 		Version:      "1.0.0",                                           // Event schema version
 		OccurredAt:   time.Now().UTC(),                                  // Event timestamp
-		CorrelationID: uuid.New().String(),                              // Unique correlation ID
-		Payload:      record,                                            // The record data
+		CorrelationID: correlationID,                                    // Use request correlation ID
+		Payload:      payload,                                           // The specific record event data
 	}
 	
 	// Marshal the envelope to JSON
@@ -231,8 +261,8 @@ func (p *natsPub) PublishRecordCreated(ctx context.Context, collection string, r
 		return err
 	}
 	
-	// Update deduplication map on successful publish
-	p.updateDedup(record.ID, p.recordDedup)
+	// Update deduplication map on successful publish using correlation ID
+	p.updateDedup(correlationID, p.recordDedup)
 	
 	return nil
 }
@@ -245,8 +275,21 @@ func (p *natsPub) PublishRecordCreated(ctx context.Context, collection string, r
 // Returns:
 //   - error: Any error that occurred during publishing
 func (p *natsPub) PublishMediaFinalized(ctx context.Context, asset model.MediaAsset) error {
-	// Check if this event should be deduplicated
-	if p.shouldDedup(asset.AssetID, p.mediaDedup) {
+	// Extract correlation ID from context if available
+	correlationID := ""
+	if ctx.Value(ContextKeyCorrelationID) != nil {
+		if cid, ok := ctx.Value(ContextKeyCorrelationID).(string); ok {
+			correlationID = cid
+		}
+	}
+	
+	// If no correlation ID in context, generate a new one
+	if correlationID == "" {
+		correlationID = uuid.New().String()
+	}
+	
+	// Check if this event should be deduplicated based on correlation ID
+	if p.shouldDedup(correlationID, p.mediaDedup) {
 		// Event was published recently, skip it
 		return nil
 	}
@@ -255,12 +298,22 @@ func (p *natsPub) PublishMediaFinalized(ctx context.Context, asset model.MediaAs
 	subject := "cdv.media.finalized"
 	
 	// Create the event envelope with metadata
+	// Create a specific payload with only the required fields
+	payload := map[string]interface{}{
+		"assetId":      asset.AssetID,
+		"uri":          asset.URI,
+		"checksum":     asset.Checksum,
+		"size":         asset.Size,
+		"mimeType":     asset.MimeType,
+		"correlationId": correlationID,
+	}
+
 	envelope := EventEnvelope{
 		Type:         "cdv.media.finalized",      // Event type
 		Version:      "1.0.0",                   // Event schema version
 		OccurredAt:   time.Now().UTC(),          // Event timestamp
-		CorrelationID: uuid.New().String(),      // Unique correlation ID
-		Payload:      asset,                     // The media asset data
+		CorrelationID: correlationID,            // Use request correlation ID
+		Payload:      payload,                   // The specific media event data
 	}
 	
 	// Marshal the envelope to JSON
@@ -275,8 +328,8 @@ func (p *natsPub) PublishMediaFinalized(ctx context.Context, asset model.MediaAs
 		return err
 	}
 	
-	// Update deduplication map on successful publish
-	p.updateDedup(asset.AssetID, p.mediaDedup)
+	// Update deduplication map on successful publish using correlation ID
+	p.updateDedup(correlationID, p.mediaDedup)
 	
 	return nil
 }

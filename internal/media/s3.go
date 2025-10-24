@@ -5,7 +5,9 @@ package media
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -107,10 +109,24 @@ func (s *S3Client) VerifyObject(ctx context.Context, key, expectedChecksum strin
 		return false, 0, fmt.Errorf("failed to get object metadata: %w", err)
 	}
 
-	// Check if checksum matches
-	// Note: This is a simplified implementation. In a real implementation,
-	// you would need to calculate the actual checksum of the object.
-	actualChecksum := "" // In a real implementation, you would get this from the object metadata
+	// Download the object to calculate its checksum
+	getObjectOutput, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to download object: %w", err)
+	}
+	defer getObjectOutput.Body.Close()
+
+	// Calculate SHA-256 checksum of the object
+	hash := sha256.New()
+	if _, err := io.Copy(hash, getObjectOutput.Body); err != nil {
+		return false, 0, fmt.Errorf("failed to calculate checksum: %w", err)
+	}
+	actualChecksum := fmt.Sprintf("%x", hash.Sum(nil))
+
+	// Compare checksums
 	if actualChecksum != expectedChecksum {
 		return false, *result.ContentLength, nil
 	}

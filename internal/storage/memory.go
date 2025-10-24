@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +41,7 @@ type Store interface {
 	GetAccount(ctx context.Context, did string) (*model.Account, error)            // Get an account by DID
 	
 	// Idempotency operations
-	StoreIdempotentResponse(ctx context.Context, keyHash string, responseBody []byte, statusCode int, expiresAt time.Time) error // Store idempotent response
+	StoreIdempotentResponse(ctx context.Context, keyHash, requestHash string, responseBody []byte, statusCode int, expiresAt time.Time) error // Store idempotent response
 	GetIdempotentResponse(ctx context.Context, keyHash string) ([]byte, int, error) // Get cached idempotent response
 }
 
@@ -120,32 +122,35 @@ func (m *memory) CreateRecord(ctx context.Context, record model.Record) error {
 	return nil
 }
 
-// encodeMemoryCursor encodes cursor data into a base64 string for memory storage
+// memoryCursorData represents the data encoded in a pagination cursor for memory storage
+type memoryCursorData struct {
+	LastIndexedAt time.Time // Timestamp of the last record
+	LastRKey      string    // RKey of the last record
+}
+
+// encodeMemoryCursor encodes cursor data into a base64 string
 func encodeMemoryCursor(lastIndexedAt time.Time, lastRKey string) string {
-	data := map[string]interface{}{
-		"lastIndexedAt": lastIndexedAt.UnixNano(),
-		"lastRKey":      lastRKey,
+	data := memoryCursorData{
+		LastIndexedAt: lastIndexedAt,
+		LastRKey:      lastRKey,
 	}
 	jsonBytes, _ := json.Marshal(data)
 	return base64.URLEncoding.EncodeToString(jsonBytes)
 }
 
-// decodeMemoryCursor decodes a base64 cursor string into cursor data for memory storage
+// decodeMemoryCursor decodes a base64 cursor string into cursor data
 func decodeMemoryCursor(cursor string) (time.Time, string, error) {
 	dataBytes, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, "", err
+		return time.Time{}, "", fmt.Errorf("invalid cursor format: %w", err)
 	}
 	
-	var data map[string]interface{}
+	var data memoryCursorData
 	if err := json.Unmarshal(dataBytes, &data); err != nil {
-		return time.Time{}, "", err
+		return time.Time{}, "", fmt.Errorf("invalid cursor data: %w", err)
 	}
 	
-	lastIndexedAt := time.Unix(0, int64(data["lastIndexedAt"].(float64)))
-	lastRKey := data["lastRKey"].(string)
-	
-	return lastIndexedAt, lastRKey, nil
+	return data.LastIndexedAt, data.LastRKey, nil
 }
 
 func (m *memory) ListRecords(ctx context.Context, query model.ListRecordsQuery) (*model.ListRecordsResult, error) {
@@ -282,14 +287,29 @@ func (m *memory) UpdateMediaAsset(ctx context.Context, asset model.MediaAsset) e
 }
 
 // StoreIdempotentResponse stores an idempotent response in memory
-func (m *memory) StoreIdempotentResponse(ctx context.Context, keyHash string, responseBody []byte, statusCode int, expiresAt time.Time) error {
+func (m *memory) StoreIdempotentResponse(ctx context.Context, keyHash, requestHash string, responseBody []byte, statusCode int, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	
+	// First, check if there are existing entries with the same key_hash but different request_hash
+	for compositeKey := range m.idempotency {
+		// Check if this entry has the same keyHash but different requestHash
+		if strings.HasPrefix(compositeKey, keyHash+":") {
+			parts := strings.SplitN(compositeKey, ":", 2)
+			if len(parts) == 2 && parts[1] != requestHash {
+				// Found an entry with same key_hash but different request_hash - this is a conflict
+				return ErrConflict
+			}
+		}
+	}
 	
 	responseCopy := make([]byte, len(responseBody))
 	copy(responseCopy, responseBody)
 	
-	m.idempotency[keyHash] = &IdempotentResponse{
+	// Create a composite key using both keyHash and requestHash
+	compositeKey := keyHash + ":" + requestHash
+	
+	m.idempotency[compositeKey] = &IdempotentResponse{
 		ResponseBody: responseCopy,
 		StatusCode:   statusCode,
 		ExpiresAt:    expiresAt,
@@ -302,20 +322,24 @@ func (m *memory) GetIdempotentResponse(ctx context.Context, keyHash string) ([]b
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	
-	response, exists := m.idempotency[keyHash]
-	if !exists {
-		return nil, 0, ErrNotFound
+	// Look for any entry with the given keyHash
+	// In a real implementation, we would check for conflicts with different requestHash values
+	// For now, we'll just return the first match
+	for compositeKey, response := range m.idempotency {
+		// Extract keyHash from composite key
+		if strings.HasPrefix(compositeKey, keyHash+":") {
+			// Check if the response has expired
+			if time.Now().UTC().After(response.ExpiresAt) {
+				// Skip expired entries
+				continue
+			}
+			
+			responseCopy := make([]byte, len(response.ResponseBody))
+			copy(responseCopy, response.ResponseBody)
+			
+			return responseCopy, response.StatusCode, nil
+		}
 	}
 	
-	// Check if the response has expired
-	if time.Now().UTC().After(response.ExpiresAt) {
-		// Remove expired entry
-		delete(m.idempotency, keyHash)
-		return nil, 0, ErrNotFound
-	}
-	
-	responseCopy := make([]byte, len(response.ResponseBody))
-	copy(responseCopy, response.ResponseBody)
-	
-	return responseCopy, response.StatusCode, nil
+	return nil, 0, ErrNotFound
 }

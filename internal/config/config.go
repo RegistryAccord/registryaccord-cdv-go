@@ -174,6 +174,15 @@ func Load() (Config, error) {
 		}
 	}
 
+	// Validate required parameters
+	if cfg.JWTIssuer == "" {
+		return cfg, fmt.Errorf("CDV_JWT_ISSUER is required")
+	}
+	
+	if cfg.JWTAudience == "" {
+		return cfg, fmt.Errorf("CDV_JWT_AUDIENCE is required")
+	}
+	
 	return cfg, nil
 }
 

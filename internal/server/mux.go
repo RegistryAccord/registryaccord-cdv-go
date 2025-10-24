@@ -18,15 +18,18 @@ import (
 	"strings"
 	"time"
 
+	errordefs "github.com/RegistryAccord/registryaccord-cdv-go/internal/errors"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/event"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/identity"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/jwks"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/media"
+	"github.com/RegistryAccord/registryaccord-cdv-go/internal/metrics"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/model"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/schema"
 	"github.com/RegistryAccord/registryaccord-cdv-go/internal/storage"
 	"github.com/google/uuid"
 	"github.com/oklog/ulid/v2"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -59,6 +62,7 @@ type Mux struct {
 	jwtAudience string         // Expected JWT audience for validation
 	validator *schema.Validator // Schema validator for record validation
 	mediaClient *media.S3Client // S3 client for media storage operations
+	metrics     *metrics.Metrics // Metrics for monitoring
 	
 	// Media limits
 	maxMediaSize int64      // Maximum media size in bytes
@@ -124,6 +128,7 @@ func NewMux(s storage.Store, p event.Publisher, id *identity.Client, jwtIssuer, 
 		jwtAudience: jwtAudience,
 		validator:   validator,
 		mediaClient: mediaClient,
+		metrics:     metrics.NewMetrics(),
 		maxMediaSize: maxMediaSize,
 		allowedMimeTypes: allowedMimeTypes,
 		rejectDeprecatedSchemas: rejectDeprecatedSchemas,
@@ -132,6 +137,7 @@ func NewMux(s storage.Store, p event.Publisher, id *identity.Client, jwtIssuer, 
 	// Register health endpoints
 	m.mux.HandleFunc("/healthz", m.handleHealthz)
 	m.mux.HandleFunc("/readyz", m.handleReadyz)
+	m.mux.Handle("/metrics", promhttp.Handler())
 
 	// Register Phase 1 CDV endpoints with appropriate middleware
 	m.mux.HandleFunc("/v1/repo/record", m.method("POST", m.withMiddleware(m.handleCreateRecord)))
@@ -147,7 +153,8 @@ func NewMux(s storage.Store, p event.Publisher, id *identity.Client, jwtIssuer, 
 func (m *Mux) method(method string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != method {
-			m.writeError(w, http.StatusMethodNotAllowed, "CDV_BAD_REQUEST", "method not allowed", "", nil)
+			err := errordefs.New(errordefs.CDV_BAD_REQUEST, "method not allowed", "")
+			m.writeErrorDef(w, err)
 			return
 		}
 		h(w, r)
@@ -215,8 +222,16 @@ func (m *Mux) withMiddleware(h http.HandlerFunc) http.HandlerFunc {
 		if r.Method == "POST" || strings.HasPrefix(r.URL.Path, "/v1/media/") {
 			did, err := m.validateJWT(r)
 			if err != nil {
-				m.writeError(w, http.StatusUnauthorized, "CDV_AUTHZ", "invalid JWT", correlationID, nil)
-				m.logRequest(r, http.StatusUnauthorized, time.Since(start), correlationID, err)
+				// Check if err is already an errordefs.Error or create a new one
+				var errorDef *errordefs.Error
+				if e, ok := err.(*errordefs.Error); ok {
+					errorDef = e
+					errorDef.CorrelationID = correlationID
+				} else {
+					errorDef = errordefs.New(errordefs.CDV_AUTHZ, err.Error(), correlationID)
+				}
+				m.writeErrorDef(w, errorDef)
+				m.logRequest(r, errorDef.HTTPStatus, time.Since(start), correlationID, err)
 				return
 			}
 			r = r.WithContext(context.WithValue(r.Context(), ContextKeyDID, did))
@@ -231,11 +246,11 @@ func (m *Mux) withMiddleware(h http.HandlerFunc) http.HandlerFunc {
 func (m *Mux) validateJWT(r *http.Request) (string, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return "", errors.New("missing Authorization header")
+		return "", errordefs.New(errordefs.CDV_AUTHN, "missing Authorization header", "")
 	}
 
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return "", errors.New("invalid Authorization header format")
+		return "", errordefs.New(errordefs.CDV_AUTHN, "invalid Authorization header format", "")
 	}
 
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
@@ -243,12 +258,28 @@ func (m *Mux) validateJWT(r *http.Request) (string, error) {
 	// Validate JWT using JWKS
 	claims, err := m.jwksClient.ValidateJWT(r.Context(), tokenString, m.jwtIssuer, m.jwtAudience)
 	if err != nil {
-		return "", fmt.Errorf("failed to validate JWT: %w", err)
+		// Map specific JWT validation errors to appropriate error codes
+		errStr := err.Error()
+		if strings.Contains(errStr, "expired") {
+			return "", errordefs.New(errordefs.CDV_JWT_EXPIRED, "JWT token expired", "")
+		} else if strings.Contains(errStr, "invalid issuer") {
+			return "", errordefs.New(errordefs.CDV_JWT_INVALID, "invalid JWT issuer", "")
+		} else if strings.Contains(errStr, "invalid audience") {
+			return "", errordefs.New(errordefs.CDV_JWT_INVALID, "invalid JWT audience", "")
+		} else if strings.Contains(errStr, "kid") {
+			return "", errordefs.New(errordefs.CDV_JWT_MALFORMED, "missing or invalid kid in JWT header", "")
+		} else if strings.Contains(errStr, "key") {
+			return "", errordefs.New(errordefs.CDV_JWT_INVALID, "failed to get key for JWT validation", "")
+		} else if strings.Contains(errStr, "signature") || strings.Contains(errStr, "verify") {
+			return "", errordefs.New(errordefs.CDV_JWT_INVALID, "invalid JWT signature", "")
+		} else {
+			return "", errordefs.New(errordefs.CDV_JWT_INVALID, fmt.Sprintf("failed to validate JWT: %v", err), "")
+		}
 	}
 
 	did, ok := claims["sub"].(string)
 	if !ok || did == "" {
-		return "", errors.New("missing or invalid sub claim")
+		return "", errordefs.New(errordefs.CDV_JWT_INVALID, "missing or invalid sub claim", "")
 	}
 
 	return did, nil
@@ -281,6 +312,11 @@ func (m *Mux) writeError(w http.ResponseWriter, statusCode int, code, message, c
 	}
 	
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// writeErrorDef writes an error response using the error definitions package
+func (m *Mux) writeErrorDef(w http.ResponseWriter, err *errordefs.Error) {
+	m.writeError(w, err.HTTPStatus, string(err.Code), err.Message, err.CorrelationID, err.Details)
 }
 
 // logRequest logs request details
@@ -353,7 +389,8 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		span.SetStatus(codes.Error, "invalid JSON")
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "invalid JSON", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "invalid JSON", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 	
@@ -368,7 +405,8 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.Collection == "" || req.DID == "" || req.Record == nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "collection, did, and record are required", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "collection, did, and record are required", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -376,7 +414,8 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	jwtDID := ctx.Value(ContextKeyDID).(string)
 	if req.DID != jwtDID {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusForbidden, "CDV_AUTHZ", "DID must match JWT subject", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_DID_MISMATCH, "DID must match JWT subject", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -399,7 +438,8 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	schemaVersion, err := m.validator.Validate(req.Collection, req.Record)
 	if err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusBadRequest, "CDV_SCHEMA_REJECT", fmt.Sprintf("schema validation failed: %v", err), correlationID, nil)
+		err := errordefs.NewWithDetails(errordefs.CDV_SCHEMA_REJECT, fmt.Sprintf("schema validation failed: %v", err), correlationID, err.Error())
+		m.writeErrorDef(w, err)
 		return
 	}
 	
@@ -430,12 +470,14 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, storage.ErrNotFound) {
 			if err := m.s.CreateAccount(ctx, req.DID); err != nil {
 				correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-				m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to create account", correlationID, nil)
+				err := errordefs.New(errordefs.CDV_INTERNAL, "failed to create account", correlationID)
+				m.writeErrorDef(w, err)
 				return
 			}
 		} else {
 			correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-			m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to check account", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_INTERNAL, "failed to check account", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
 	}
@@ -473,11 +515,13 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	if err := m.s.CreateRecord(ctx, record); err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		if errors.Is(err, storage.ErrConflict) {
-			m.writeError(w, http.StatusConflict, "CDV_CONFLICT", "record already exists", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_CONFLICT, "record already exists", correlationID)
+			m.writeErrorDef(w, err)
 			m.logRequest(r, http.StatusConflict, time.Since(start), correlationID, err)
 			return
 		}
-		m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to create record", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_INTERNAL, "failed to create record", correlationID)
+		m.writeErrorDef(w, err)
 		m.logRequest(r, http.StatusInternalServerError, time.Since(start), correlationID, err)
 		return
 	}
@@ -496,9 +540,25 @@ func (m *Mux) handleCreateRecord(w http.ResponseWriter, r *http.Request) {
 	// Store response for idempotency if key was provided
 	if req.IdempotencyKey != "" {
 		keyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.IdempotencyKey)))
+		// Calculate request hash for conflict detection
+		requestBytes, _ := json.Marshal(req)
+		requestHash := fmt.Sprintf("%x", sha256.Sum256(requestBytes))
 		responseBody, _ := json.Marshal(map[string]interface{}{"data": response})
 		expiresAt := time.Now().UTC().Add(24 * time.Hour) // 24-hour expiration
-		m.s.StoreIdempotentResponse(ctx, keyHash, responseBody, http.StatusOK, expiresAt)
+		
+		// Try to store the idempotent response
+		// If there's a conflict with a different request hash, this should return an error
+		if err := m.s.StoreIdempotentResponse(ctx, keyHash, requestHash, responseBody, http.StatusOK, expiresAt); err != nil {
+			// Check if this is a conflict error (different payload for same idempotency key)
+			if errors.Is(err, storage.ErrConflict) {
+				correlationID := ctx.Value(ContextKeyCorrelationID).(string)
+				err := errordefs.New(errordefs.CDV_CONFLICT, "idempotency key conflict: different payload for same key", correlationID)
+				m.writeErrorDef(w, err)
+				return
+			}
+			// For other errors, log and continue (don't fail the request for idempotency issues)
+			slog.Warn("failed to store idempotent response", "error", err)
+		}
 	}
 
 	m.writeSuccess(w, http.StatusOK, response)
@@ -515,7 +575,8 @@ func (m *Mux) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	if did == "" {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		span.SetStatus(codes.Error, "did is required")
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "did is required", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "did is required", correlationID)
+		m.writeErrorDef(w, err)
 		m.logRequest(r, http.StatusBadRequest, time.Since(start), correlationID, errors.New("did is required"))
 		return
 	}
@@ -571,7 +632,17 @@ func (m *Mux) handleListRecords(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		span.SetStatus(codes.Error, "failed to list records")
-		m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to list records", correlationID, nil)
+		
+		// Check if this is a cursor validation error
+		if strings.Contains(err.Error(), "invalid cursor") {
+			err := errordefs.New(errordefs.CDV_CURSOR_INVALID, err.Error(), correlationID)
+			m.writeErrorDef(w, err)
+			return
+		}
+		
+		// For all other errors, return internal error
+		errDef := errordefs.New(errordefs.CDV_INTERNAL, "failed to list records", correlationID)
+		m.writeErrorDef(w, errDef)
 		return
 	}
 
@@ -588,7 +659,8 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		span.SetStatus(codes.Error, "invalid JSON")
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "invalid JSON", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "invalid JSON", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 	
@@ -603,14 +675,16 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.DID == "" || req.MimeType == "" || req.Size <= 0 {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "did, mimeType, and size are required", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "did, mimeType, and size are required", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
 	// Validate media size limit
 	if req.Size > m.maxMediaSize {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusBadRequest, "CDV_MEDIA_SIZE_LIMIT", fmt.Sprintf("media size exceeds limit of %d bytes", m.maxMediaSize), correlationID, nil)
+		err := errordefs.New(errordefs.CDV_MEDIA_SIZE, fmt.Sprintf("media size exceeds limit of %d bytes", m.maxMediaSize), correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -624,7 +698,8 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusBadRequest, "CDV_MEDIA_TYPE_NOT_ALLOWED", fmt.Sprintf("media type %s is not allowed", req.MimeType), correlationID, nil)
+		err := errordefs.New(errordefs.CDV_MEDIA_TYPE, fmt.Sprintf("media type %s is not allowed", req.MimeType), correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -632,7 +707,8 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	jwtDID := ctx.Value(ContextKeyDID).(string)
 	if req.DID != jwtDID {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusForbidden, "CDV_AUTHZ", "DID must match JWT subject", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_DID_MISMATCH, "DID must match JWT subject", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -641,12 +717,14 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, storage.ErrNotFound) {
 			if err := m.s.CreateAccount(ctx, req.DID); err != nil {
 				correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-				m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to create account", correlationID, nil)
+				err := errordefs.New(errordefs.CDV_INTERNAL, "failed to create account", correlationID)
+				m.writeErrorDef(w, err)
 				return
 			}
 		} else {
 			correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-			m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to check account", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_INTERNAL, "failed to check account", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
 	}
@@ -669,10 +747,12 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	if err := m.s.CreateMediaAsset(ctx, asset); err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		if errors.Is(err, storage.ErrConflict) {
-			m.writeError(w, http.StatusConflict, "CDV_CONFLICT", "asset already exists", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_CONFLICT, "asset already exists", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
-		m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to create media asset", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_INTERNAL, "failed to create media asset", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -691,7 +771,8 @@ func (m *Mux) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		uploadURL, err = m.mediaClient.GenerateUploadURL(ctx, objectKey, 15*time.Minute)
 		if err != nil {
 			correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-			m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to generate upload URL", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_INTERNAL, "failed to generate upload URL", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
 	} else {
@@ -722,7 +803,8 @@ func (m *Mux) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		span.SetStatus(codes.Error, "invalid JSON")
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "invalid JSON", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "invalid JSON", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 	
@@ -735,7 +817,8 @@ func (m *Mux) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.AssetID == "" || req.SHA256 == "" {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusBadRequest, "CDV_VALIDATION", "assetId and sha256 are required", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_VALIDATION, "assetId and sha256 are required", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -744,10 +827,12 @@ func (m *Mux) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
 		if errors.Is(err, storage.ErrNotFound) {
-			m.writeError(w, http.StatusNotFound, "CDV_NOT_FOUND", "asset not found", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_NOT_FOUND, "asset not found", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
-		m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to get media asset", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_INTERNAL, "failed to get media asset", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -755,7 +840,8 @@ func (m *Mux) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	jwtDID := ctx.Value(ContextKeyDID).(string)
 	if asset.DID != jwtDID {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusForbidden, "CDV_AUTHZ", "DID must match JWT subject", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_DID_MISMATCH, "DID must match JWT subject", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 
@@ -767,13 +853,15 @@ func (m *Mux) handleFinalize(w http.ResponseWriter, r *http.Request) {
 		valid, size, err := m.mediaClient.VerifyObject(ctx, objectKey, req.SHA256)
 		if err != nil {
 			correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-			m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to verify media object", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_INTERNAL, "failed to verify media object", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
 		
 		if !valid {
 			correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-			m.writeError(w, http.StatusBadRequest, "CDV_MEDIA_CHECKSUM_MISMATCH", "checksum verification failed", correlationID, nil)
+			err := errordefs.New(errordefs.CDV_MEDIA_CHECKSUM, "checksum verification failed", correlationID)
+			m.writeErrorDef(w, err)
 			return
 		}
 		
@@ -785,7 +873,8 @@ func (m *Mux) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	asset.Checksum = req.SHA256
 	if err := m.s.UpdateMediaAsset(ctx, *asset); err != nil {
 		correlationID := ctx.Value(ContextKeyCorrelationID).(string)
-		m.writeError(w, http.StatusInternalServerError, "CDV_INTERNAL", "failed to update media asset", correlationID, nil)
+		err := errordefs.New(errordefs.CDV_INTERNAL, "failed to update media asset", correlationID)
+		m.writeErrorDef(w, err)
 		return
 	}
 

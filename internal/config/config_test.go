@@ -21,6 +21,16 @@ func TestLoad(t *testing.T) {
 	os.Unsetenv("CDV_JWT_ISSUER")
 	os.Unsetenv("CDV_JWT_AUDIENCE")
 	os.Unsetenv("IDENTITY_URL")
+	
+	// Set required JWT parameters for validation
+	os.Setenv("CDV_JWT_ISSUER", "test-issuer")
+	os.Setenv("CDV_JWT_AUDIENCE", "test-audience")
+	
+	// Clean up environment variables after test
+	t.Cleanup(func() {
+		os.Unsetenv("CDV_JWT_ISSUER")
+		os.Unsetenv("CDV_JWT_AUDIENCE")
+	})
 
 	cfg, err := Load()
 	if err != nil {

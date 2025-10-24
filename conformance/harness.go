@@ -152,16 +152,55 @@ func (h *Harness) testHealthEndpoints(t *testing.T) {
 
 // testRecordOperations tests record creation and listing operations.
 func (h *Harness) testRecordOperations(t *testing.T) {
-	// This would test record creation, listing, etc.
-	// For now, we'll just verify the endpoints exist
-	t.Log("Record operations tests would be implemented here")
+	// Test valid record creation
+	t.Run("ValidRecordCreation", func(t *testing.T) {
+		// This would test valid record creation
+		t.Log("Valid record creation test would be implemented here")
+	})
+	
+	// Test schema invalid record
+	t.Run("SchemaInvalidRecord", func(t *testing.T) {
+		// Test creating a record with invalid schema
+		// Should return CDV_SCHEMA_REJECT error
+		t.Log("Schema invalid record test would be implemented here")
+	})
+	
+	// Test idempotency conflict
+	t.Run("IdempotencyConflict", func(t *testing.T) {
+		// Test using same idempotency key with different payloads
+		// Should return CDV_CONFLICT error
+		t.Log("Idempotency conflict test would be implemented here")
+	})
 }
 
 // testMediaOperations tests media upload and metadata operations.
 func (h *Harness) testMediaOperations(t *testing.T) {
-	// This would test media upload initialization, finalization, and metadata retrieval
-	// For now, we'll just verify the endpoints exist
-	t.Log("Media operations tests would be implemented here")
+	// Test valid media upload
+	t.Run("ValidMediaUpload", func(t *testing.T) {
+		// This would test valid media upload
+		t.Log("Valid media upload test would be implemented here")
+	})
+	
+	// Test oversize media
+	t.Run("OversizeMedia", func(t *testing.T) {
+		// Test uploading media that exceeds size limits
+		// Should return CDV_MEDIA_SIZE error
+		t.Log("Oversize media test would be implemented here")
+	})
+	
+	// Test disallowed media type
+	t.Run("DisallowedMediaType", func(t *testing.T) {
+		// Test uploading media with disallowed MIME type
+		// Should return CDV_MEDIA_TYPE error
+		t.Log("Disallowed media type test would be implemented here")
+	})
+	
+	// Test checksum mismatch
+	t.Run("ChecksumMismatch", func(t *testing.T) {
+		// Test finalizing media with incorrect checksum
+		// Should return CDV_MEDIA_CHECKSUM error
+		t.Log("Checksum mismatch test would be implemented here")
+	})
 }
 
 // testSchemaValidation tests schema validation for different record types.
@@ -173,9 +212,18 @@ func (h *Harness) testSchemaValidation(t *testing.T) {
 
 // testPagination tests pagination functionality.
 func (h *Harness) testPagination(t *testing.T) {
-	// This would test pagination with cursors
-	// For now, we'll just verify the pagination logic exists
-	t.Log("Pagination tests would be implemented here")
+	// Test valid pagination
+	t.Run("ValidPagination", func(t *testing.T) {
+		// This would test valid pagination
+		t.Log("Valid pagination test would be implemented here")
+	})
+	
+	// Test malformed cursor
+	t.Run("MalformedCursor", func(t *testing.T) {
+		// Test using an invalid cursor format
+		// Should return CDV_CURSOR_INVALID error
+		t.Log("Malformed cursor test would be implemented here")
+	})
 }
 
 // RunAcceptanceTests runs acceptance tests that verify the implementation
@@ -221,7 +269,25 @@ func (h *Harness) testAPICompliance(t *testing.T) {
 
 // testAuthCompliance tests authentication compliance with requirements.
 func (h *Harness) testAuthCompliance(t *testing.T) {
-	t.Log("Auth compliance tests would be implemented here")
+	// Test valid authentication
+	t.Run("ValidAuth", func(t *testing.T) {
+		// This would test valid JWT authentication
+		t.Log("Valid auth test would be implemented here")
+	})
+	
+	// Test expired/used nonce
+	t.Run("ExpiredUsedNonce", func(t *testing.T) {
+		// Test using an expired or already used nonce
+		// Should return appropriate auth error
+		t.Log("Expired/used nonce test would be implemented here")
+	})
+	
+	// Test unknown/retired kid
+	t.Run("UnknownRetiredKid", func(t *testing.T) {
+		// Test using a JWT with unknown or retired key ID
+		// Should return CDV_JWT_INVALID or CDV_JWT_MALFORMED error
+		t.Log("Unknown/retired kid test would be implemented here")
+	})
 }
 
 // testSchemaCompliance tests schema compliance with requirements.

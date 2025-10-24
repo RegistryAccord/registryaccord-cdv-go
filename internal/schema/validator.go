@@ -76,6 +76,7 @@ func (v *Validator) SetResolver(resolver *Resolver) {
 // loadSchemas loads all supported schemas.
 // This function initializes the JSON schemas for all supported collection types.
 // Each schema is loaded and compiled for efficient validation.
+// TODO: Fetch actual schema definitions from the specs repository instead of using hardcoded schemas
 func (v *Validator) loadSchemas() error {
 	// Load post schema - for user-generated content posts
 	postSchema := `{"type":"object","required":["text","createdAt","authorDid"],"properties":{"text":{"type":"string","maxLength":2048},"createdAt":{"type":"string","format":"datetime"},"authorDid":{"type":"string","format":"did"}}}`

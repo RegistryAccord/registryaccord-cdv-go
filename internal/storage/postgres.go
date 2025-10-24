@@ -116,11 +116,14 @@ func initSchema(ctx context.Context, db *pgxpool.Pool) error {
 
 		-- Idempotency table for storing idempotency keys
 		CREATE TABLE IF NOT EXISTS idempotency (
-		    key_hash TEXT PRIMARY KEY,               -- Hash of the idempotency key
+		    key_hash TEXT,                           -- Hash of the idempotency key
+		    request_hash TEXT NOT NULL,              -- Hash of the request payload for conflict detection
 		    response_body BYTEA NOT NULL,            -- Cached response body
 		    response_status INTEGER NOT NULL,        -- HTTP status code
 		    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),  -- When the entry was created
-		    expires_at TIMESTAMP WITH TIME ZONE NOT NULL  -- When the entry expires
+		    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,  -- When the entry expires
+		    PRIMARY KEY (key_hash, request_hash),    -- Composite primary key for conflict detection
+		    UNIQUE(key_hash, request_hash)           -- Prevent conflicts with same key but different payloads
 		);
 
 		-- Index for idempotency table to improve query performance
@@ -492,13 +495,29 @@ func (p *postgres) UpdateMediaAsset(ctx context.Context, asset model.MediaAsset)
 }
 
 // StoreIdempotentResponse stores an idempotent response in the database
-func (p *postgres) StoreIdempotentResponse(ctx context.Context, keyHash string, responseBody []byte, statusCode int, expiresAt time.Time) error {
-	query := `INSERT INTO idempotency (key_hash, response_body, response_status, created_at, expires_at)
-	          VALUES ($1, $2, $3, $4, $5)
-	          ON CONFLICT (key_hash) DO UPDATE 
-	          SET response_body = $2, response_status = $3, created_at = $4, expires_at = $5`
+func (p *postgres) StoreIdempotentResponse(ctx context.Context, keyHash, requestHash string, responseBody []byte, statusCode int, expiresAt time.Time) error {
+	// First, check if there are existing entries with the same key_hash but different request_hash
+	var existingRequestHash string
+	query := `SELECT request_hash FROM idempotency WHERE key_hash = $1 AND request_hash != $2 LIMIT 1`
 	
-	_, err := p.db.Exec(ctx, query, keyHash, responseBody, statusCode, time.Now().UTC(), expiresAt)
+	err := p.db.QueryRow(ctx, query, keyHash, requestHash).Scan(&existingRequestHash)
+	if err != nil {
+		// If no rows found, that's fine - no conflict
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("failed to check for idempotency conflicts: %w", err)
+		}
+	} else {
+		// Found an entry with same key_hash but different request_hash - this is a conflict
+		return ErrConflict
+	}
+	
+	// Now try to insert or update
+	query = `INSERT INTO idempotency (key_hash, request_hash, response_body, response_status, created_at, expires_at)
+	          VALUES ($1, $2, $3, $4, $5, $6)
+	          ON CONFLICT (key_hash, request_hash) DO UPDATE 
+	          SET response_body = $3, response_status = $4, created_at = $5, expires_at = $6`
+	
+	_, err = p.db.Exec(ctx, query, keyHash, requestHash, responseBody, statusCode, time.Now().UTC(), expiresAt)
 	if err != nil {
 		return fmt.Errorf("failed to store idempotent response: %w", err)
 	}
