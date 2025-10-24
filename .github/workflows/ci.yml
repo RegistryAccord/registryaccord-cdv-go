@@ -31,8 +31,7 @@ jobs:
       - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.61.0
-          args: --version
+          version: v1.58.2
 
       - name: Format check
         run: make fmt-check
@@ -45,12 +44,12 @@ jobs:
 
       - name: Coverage check
         run: |
-          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
-          if [ "$(echo "$COVERAGE < 80" | bc)" -eq 1 ]; then
-            echo "Coverage is below 80%: $COVERAGE%"
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}' | sed 's/%//')
+          if [ "$(echo "$COVERAGE < 80" | bc -l)" -eq 1 ]; then
+            echo "Coverage is below 80%: ${COVERAGE}%"
             exit 1
           else
-            echo "Coverage is acceptable: $COVERAGE%"
+            echo "Coverage is acceptable: ${COVERAGE}%"
           fi
 
       - name: Vulnerability scan
